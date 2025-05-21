@@ -27,10 +27,10 @@ def read_user(user_id: int):
 
 @app.get("/models/{model_name}")
 async def get_model(model_name: ModelName):
-    if model_name == ModelName.alexnet:
-        return {"model_name": model_name, "message": "Deep Learning"}
-    if model_name.value == "resnet":
-        return {"model_name": model_name, "message": "Deep Learning"}
+    if model_name is ModelName.alexnet:
+        return {"model_name": model_name, "message": "Deep Learning FTW!"}
+
     if model_name.value == "lenet":
-        return {"model_name": model_name, "message": "Deep Learning"}
-    return {"model_name": model_name, "message": "Model not found"} 
+        return {"model_name": model_name, "message": "LeCNN all the images"}
+
+    return {"model_name": model_name, "message": "Have some residuals"}
