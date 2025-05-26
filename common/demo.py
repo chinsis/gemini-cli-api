@@ -50,6 +50,7 @@ async def read_item(item_id: str, q: str | None=None, short: bool=False):
     """
     q是可选参数，可以是string,也可以是None，默认值是None
     short是bool类型的可选参数，默认值是False，fastapi会自动将其转换为bool类型
+    可选参数设置默认之后该参数即变为非必填选参数
     """
     if q:
         item.update({"q": q})
