@@ -1,4 +1,4 @@
-from fastapi import FastAPI, Query, Path
+from fastapi import FastAPI, Query, Path, Body
 from pydantic import BaseModel, Field
 from typing import Union, Annotated, Any, Literal
 
@@ -51,7 +51,7 @@ async def create_item(item: Item):
 
 @app.get("/items/{item_id}")
 # async def read_item_by_id(item_id: Annotated[int, Path(title="The ID of item")], q: Annotated[str | None, Query(max_length=50)] = None):
-async def read_item_by_id(*, q: str, item_id: Annotated[int, Path(title="The ID of item", ge=1, le=1000)]):
+async def read_item_by_id(*, q: str, item_id: Annotated[int, Path(title="The ID of item", ge=1, le=1000)], item: Item | None = None):
     """
     Read an item by its ID.
     带默认值的参数如果放在不带默认值的参数前，python会报错：SyntaxError: parameter without a default follows parameter with a default
@@ -61,6 +61,8 @@ async def read_item_by_id(*, q: str, item_id: Annotated[int, Path(title="The ID 
     restults: dict[Any, Any] = {"item_id": item_id}
     if q:
         restults.update({"q": q})
+    if item:
+        restults.update({"item": item})
     return restults
 
 
@@ -71,13 +73,11 @@ class FilterParams(BaseModel):
     Literal: 限定字段值只能是指定的值
     """
     model_config = {
-        "extra": "forbid",  # 禁止传递未定义的字段
-        # "use_enum_values": True,  # 使用枚举值而不是枚举名称
-        # "arbitrary_types_allowed": True,  # 允许任意类型    
+        "extra": "forbid",  # 禁止传递未定义的字段 
         } 
     limint: int = Field(10, ge=1, le=100)
     offset: int = Field(0, ge=0)
-    oder_by: Literal["created_at", "update_at"] = "created_at"
+    order_by: Literal["created_at", "update_at"] = "created_at"
     tags: list[str] = []
 
 @app.get("/itemes/about")
@@ -86,3 +86,41 @@ async def about(filter_params: Annotated[FilterParams, Query()]):
     About the items endpoint.
     """
     return filter_params
+
+class User(BaseModel):
+    """
+    User model with a name and an age.
+    """
+    name: str
+    age: int = Field(..., ge=0, le=120)  # Age must be between 0 and 120
+
+@app.post("/users/create{user_id}")
+async def create_user(
+    user_id: int, 
+    user: User, 
+    item: Item,  
+    importance: Annotated[Literal["low", "medium", "high"], Body()] = "medium",  # 设置默认值为"medium"
+    q: str | None = None):
+    """
+    Create a user with the given name and age.
+    请求体中如果存在单一值，需要声明其为Body类型，不然会被默认处理为Query参数
+    user_id作为路径参数，可以不声明为Path类型，FastAPI会自动将其作为路径参数处理
+    q为查询参数
+    """
+    results = {"user": user,"item": item}
+    if q:
+        results.update({"q": q})
+    if importance:
+        results.update({"importance": importance})
+    return results
+
+@app.put("/users/{user_id}")
+async def update_user(user_id: int,
+    user: Annotated[User, Body(embed=True)]):
+    """
+    Update a user with the given ID.
+    使用embed=True将item嵌入到请求体中
+    """
+    results = {"user_id": user_id, "user": user}
+    return results
+
