@@ -1,7 +1,7 @@
 from datetime import datetime, time, timedelta
 from typing import Annotated
 from uuid import UUID
-from fastapi import FastAPI, Body
+from fastapi import FastAPI, Body, Cookie, Header
 
 
 app = FastAPI()
@@ -26,4 +26,25 @@ async def update_item(item_id: UUID,
         "repeat_at": repeat_at,
         "start_process": start_process,
         "duration": duration,
+    }
+
+# @app.get("/items/")
+# async def read_items(useragent: Annotated[str | None, Header()] = None,
+#                      session_id: Annotated[str | None, Cookie()] = None):
+#     """
+#     Read items with the given parameters.
+#     """
+#     return {
+#         "User_Agent": useragent,
+#         "Cookie": session_id
+#     }
+
+@app.get("/items/")
+async def read_items(
+    user_agent: Annotated[str | None, Header()] = None,
+    session_id: Annotated[str | None, Cookie()] = None
+):
+    return {
+        "User_Agent": user_agent,
+        "Cookie": session_id
     }
