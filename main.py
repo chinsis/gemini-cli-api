@@ -39,7 +39,7 @@ fake_users_db = {
         "username": "alice",
         "full_name": "Alice Example",
         "email": "alice@example.com",
-        "hashed_password": pwd_context.hash(PWD),
+        "hashed_password": pwd_context.hash(PASSWORD),
         "disabled": False,
     }
 }
