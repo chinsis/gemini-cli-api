@@ -38,9 +38,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 fake_users_db = {
     "alice": {
-        "username": "moshe",
+        "username": "mosh",
         "full_name": "Xuu",
-        "email": "moshe@example.com",
+        "email": "mosh@example.com",
         "hashed_password": pwd_context.hash(PASSWORD),
         "disabled": False,
     }
