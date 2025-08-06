@@ -37,7 +37,7 @@ pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 fake_users_db = {
-    "alice": {
+    "mosh": {
         "username": "mosh",
         "full_name": "Xuu",
         "email": "mosh@example.com",
