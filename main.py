@@ -2,6 +2,8 @@
 """
 Gemini CLI API 包装服务器
 集成 OAuth2 密码模式 + JWT 鉴权，Token 永不过期
+新增：支持多轮会话的接口 /v1/chat/sessions/{session_id}/completions
+支持会话轮数限制（最多20轮），会话过期清理（10分钟），会话数量限制（最多5个）
 """
 
 from fastapi import FastAPI, HTTPException, Depends, status
@@ -12,7 +14,7 @@ import uuid
 import datetime
 import logging
 import os
-from typing import Optional, List
+from typing import Optional, List, Dict, Tuple
 from contextlib import asynccontextmanager
 import uvicorn
 
@@ -36,9 +38,9 @@ oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 fake_users_db = {
     "alice": {
-        "username": "alice",
-        "full_name": "Alice Example",
-        "email": "alice@example.com",
+        "username": "moshe",
+        "full_name": "Xuu",
+        "email": "moshe@example.com",
         "hashed_password": pwd_context.hash(PASSWORD),
         "disabled": False,
     }
@@ -215,6 +217,80 @@ async def simple_chat(request: SimpleChatRequest, current_user: User = Depends(g
     if return_code == 0:
         return SimpleChatResponse(response=output, status="success")
     return SimpleChatResponse(response="", status="error", error=f"Gemini CLI 错误: {error}")
+
+# ----------- 多轮对话会话接口 -------------------
+
+# 会话存储结构:
+# sessions = {
+#   session_id: {
+#       "messages": List[Message],
+#       "last_update": datetime.datetime
+#   }
+# }
+sessions: Dict[str, Dict[str, object]] = {}
+
+MAX_SESSION_MESSAGES = 20      # 最多20轮对话
+SESSION_TIMEOUT_SECONDS = 600  # 10分钟未更新即过期
+MAX_ACTIVE_SESSIONS = 5        # 最大5个会话
+
+def cleanup_expired_sessions():
+    now = datetime.datetime.utcnow()
+    expired_sessions = [sid for sid, data in sessions.items()
+                        if (now - data["last_update"]).total_seconds() > SESSION_TIMEOUT_SECONDS]
+    for sid in expired_sessions:
+        logger.info(f"清理过期会话: {sid}")
+        del sessions[sid]
+
+def ensure_sessions_limit():
+    if len(sessions) <= MAX_ACTIVE_SESSIONS:
+        return
+    # 按最后更新时间排序，删除最早的会话
+    sorted_sessions = sorted(sessions.items(), key=lambda x: x[1]["last_update"])
+    for sid, _ in sorted_sessions[:len(sessions) - MAX_ACTIVE_SESSIONS]:
+        logger.info(f"清理超出数量限制会话: {sid}")
+        del sessions[sid]
+
+@app.post("/v1/chat/sessions/{session_id}/completions")
+async def chat_session_completions(
+    session_id: str,
+    request: ChatRequest,
+    current_user: User = Depends(get_current_active_user),
+):
+    cleanup_expired_sessions()
+    ensure_sessions_limit()
+
+    if session_id not in sessions:
+        if len(sessions) >= MAX_ACTIVE_SESSIONS:
+            raise HTTPException(status_code=429, detail="会话数量已达上限，请稍后重试")
+        sessions[session_id] = {"messages": [], "last_update": datetime.datetime.utcnow()}
+
+    # 添加新消息
+    sessions[session_id]["messages"].extend(request.messages)
+    # 保持会话轮数限制
+    if len(sessions[session_id]["messages"]) > MAX_SESSION_MESSAGES:
+        sessions[session_id]["messages"] = sessions[session_id]["messages"][-MAX_SESSION_MESSAGES:]
+
+    sessions[session_id]["last_update"] = datetime.datetime.utcnow()
+
+    # 构造prompt
+    prompt = "\n".join([f"{msg.role}: {msg.content}" for msg in sessions[session_id]["messages"]])
+
+    output, error, return_code = execute_gemini_command(prompt, request.model, request.project_id)
+    if return_code != 0:
+        raise HTTPException(status_code=500, detail=f"Gemini CLI error: {error}")
+
+    return {
+        "id": str(uuid.uuid4()),
+        "object": "chat.session.completion",
+        "created": int(datetime.datetime.now().timestamp()),
+        "model": "gemini-cli-proxy",
+        "choices": [{
+            "index": 0,
+            "message": {"role": "assistant", "content": output},
+            "logprobs": None,
+            "finish_reason": "stop"
+        }]
+    }
 
 from fastapi.middleware.cors import CORSMiddleware
 app.add_middleware(
