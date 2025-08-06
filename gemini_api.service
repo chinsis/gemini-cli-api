@@ -1,0 +1,16 @@
+[Unit]
+Description=Gemini CLI API Server
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/api
+ExecStart=/opt/api/venv/bin/python /opt/api/main.py
+EnvironmentFile=/opt/api/.env
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
