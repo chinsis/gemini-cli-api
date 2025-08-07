@@ -7,7 +7,7 @@ Gemini CLI API 包装服务器
 新增：支持图片和文件上传功能
 """
 
-from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Form, Request
+from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Form, Request, Path
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import PlainTextResponse
 from starlette.middleware.base import BaseHTTPMiddleware
@@ -557,12 +557,12 @@ def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_i
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
-    messages: str = Form(..., description="JSON格式的消息数组"),
-    model: str = Form("gemini-2.5-pro"),
-    temperature: float = Form(0.7),
-    max_tokens: int = Form(1000),
-    project_id: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None, description="可选：上传的图片或文档文件"),
+    messages: str = Form(..., description="JSON格式的消息数组", example='[{"role":"user","content":"你好，请介绍一下自己"}]'),
+    model: str = Form("gemini-2.5-pro", description="使用的AI模型", example="gemini-2.5-pro"),
+    temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", example=0.7, ge=0.0, le=1.0),
+    max_tokens: int = Form(1000, description="最大生成token数量", example=1000, ge=1, le=8192),
+    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123"),
+    file: Optional[UploadFile] = File(None, description="可选：上传的图片或文档文件（支持jpg,png,pdf,txt等）"),
     current_user: User = Depends(get_current_active_user)
 ):
     """OpenAI兼容的聊天完成接口，支持文件上传"""
@@ -628,10 +628,10 @@ async def chat_completions(
 
 @app.post("/chat", response_model=SimpleChatResponse)
 async def simple_chat(
-    message: str = Form(..., description="用户消息"),
-    model: str = Form("gemini-2.5-pro"),
-    project_id: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None, description="可选：上传的图片或文档文件"),
+    message: str = Form(..., description="用户消息内容", example="请帮我分析这个文件的内容"),
+    model: str = Form("gemini-2.5-pro", description="使用的AI模型", example="gemini-2.5-pro"),
+    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123"),
+    file: Optional[UploadFile] = File(None, description="可选：上传的图片或文档文件（最大20MB，支持jpg,png,pdf,docx,txt等）"),
     current_user: User = Depends(get_current_active_user)
 ):
     """简单的聊天接口，支持文件上传"""
@@ -713,13 +713,13 @@ def ensure_sessions_limit():
 
 @app.post("/v1/chat/sessions/{session_id}/completions")
 async def chat_session_completions(
-    session_id: str,
-    messages: str = Form(..., description="JSON格式的消息数组"),
-    model: str = Form("gemini-2.5-pro"),
-    temperature: float = Form(0.7),
-    max_tokens: int = Form(1000),
-    project_id: Optional[str] = Form(None),
-    file: Optional[UploadFile] = File(None, description="可选：上传的图片或文档文件"),
+    session_id: str = Path(..., description="会话ID，用于标识多轮对话", example="session_123"),
+    messages: str = Form(..., description="JSON格式的消息数组", example='[{"role":"user","content":"继续我们之前的对话"}]'),
+    model: str = Form("gemini-2.5-pro", description="使用的AI模型", example="gemini-2.5-pro"),
+    temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", example=0.7, ge=0.0, le=1.0),
+    max_tokens: int = Form(1000, description="最大生成token数量", example=1000, ge=1, le=8192),
+    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123"),
+    file: Optional[UploadFile] = File(None, description="可选：上传的图片或文档文件（最大20MB，支持jpg,png,pdf,docx,txt等，同名文件会智能处理）"),
     current_user: User = Depends(get_current_active_user),
 ):
     """支持多轮会话的对话接口，支持文件上传"""
