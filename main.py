@@ -504,12 +504,42 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     token = create_access_token(data={"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
+def validate_prompt_security(prompt: str) -> str:
+    """验证prompt安全性，防止读取敏感文件"""
+    # 敏感路径模式
+    dangerous_patterns = [
+        r'/root/\.',  # /root/.bashrc, /root/.ssh等
+        r'/etc/',     # 系统配置文件
+        r'/var/log/', # 日志文件
+        r'/proc/',    # 系统进程信息
+        r'/sys/',     # 系统信息
+        r'\.ssh/',    # SSH密钥
+        r'\.env',     # 环境变量文件
+        r'password',  # 包含password的路径
+        r'secret',    # 包含secret的路径
+        r'key',       # 包含key的路径
+    ]
+    
+    # 检查prompt中是否包含敏感路径
+    for pattern in dangerous_patterns:
+        if re.search(pattern, prompt, re.IGNORECASE):
+            logger.warning(f"🚨 检测到敏感路径访问尝试: {pattern}")
+            raise HTTPException(
+                status_code=403, 
+                detail=f"安全限制：不允许访问敏感路径。仅允许访问 /tmp 和 /opt/files 目录下的文件。"
+            )
+    
+    return prompt
+
 def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_id: Optional[str] = None, file_path: Optional[str] = None) -> tuple[str, str, int]:
     """执行Gemini CLI命令，支持文件输入"""
     try:
         current_project = project_id or DEFAULT_PROJECT_ID
         if not current_project:
             return "", "错误：需要指定project_id", 1
+        
+        # 验证prompt安全性
+        safe_prompt = validate_prompt_security(prompt)
         
         env = dict(os.environ)
         env.update({
@@ -523,11 +553,11 @@ def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_i
             # 获取文件所在目录
             file_dir = os.path.dirname(file_path)
             # 使用--include-directories参数让gemini可以访问文件目录
-            enhanced_prompt = f"{prompt} {file_path}"
+            enhanced_prompt = f"{safe_prompt} {file_path}"
             shell_command = f'gemini -m "{model}" -p "{enhanced_prompt}" --include-directories "{file_dir}"'
         else:
             # 没有文件时，使用原来的方式
-            shell_command = f'gemini -m "{model}" -p "{prompt}"'
+            shell_command = f'gemini -m "{model}" -p "{safe_prompt}"'
         
         logger.info(f"执行命令: {shell_command[:100]}...")
         
@@ -562,7 +592,7 @@ async def chat_completions(
     temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", example=0.7, ge=0.0, le=1.0),
     max_tokens: int = Form(1000, description="最大生成token数量", example=1000, ge=1, le=8192),
     project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123"),
-    file: Optional[UploadFile] = File(None, description="可选：上传的图片或文档文件（支持jpg,png,pdf,txt等）"),
+    file: Optional[UploadFile] = File(default=None, description="可选：上传的图片或文档文件（支持jpg,png,pdf,txt等）"),
     current_user: User = Depends(get_current_active_user)
 ):
     """OpenAI兼容的聊天完成接口，支持文件上传"""
@@ -631,7 +661,7 @@ async def simple_chat(
     message: str = Form(..., description="用户消息内容", example="请帮我分析这个文件的内容"),
     model: str = Form("gemini-2.5-pro", description="使用的AI模型", example="gemini-2.5-pro"),
     project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123"),
-    file: Optional[UploadFile] = File(None, description="可选：上传的图片或文档文件（最大20MB，支持jpg,png,pdf,docx,txt等）"),
+    file: Optional[UploadFile] = File(default=None, description="可选：上传的图片或文档文件（最大20MB，支持jpg,png,pdf,docx,txt等）"),
     current_user: User = Depends(get_current_active_user)
 ):
     """简单的聊天接口，支持文件上传"""
@@ -719,7 +749,7 @@ async def chat_session_completions(
     temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", example=0.7, ge=0.0, le=1.0),
     max_tokens: int = Form(1000, description="最大生成token数量", example=1000, ge=1, le=8192),
     project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123"),
-    file: Optional[UploadFile] = File(None, description="可选：上传的图片或文档文件（最大20MB，支持jpg,png,pdf,docx,txt等，同名文件会智能处理）"),
+    file: Optional[UploadFile] = File(default=None, description="可选：上传的图片或文档文件（最大20MB，支持jpg,png,pdf,docx,txt等，同名文件会智能处理）"),
     current_user: User = Depends(get_current_active_user),
 ):
     """支持多轮会话的对话接口，支持文件上传"""
