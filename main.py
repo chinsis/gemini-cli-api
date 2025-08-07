@@ -11,7 +11,7 @@ from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, F
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import PlainTextResponse
 from starlette.middleware.base import BaseHTTPMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import subprocess
 import uuid
 import datetime
@@ -447,9 +447,9 @@ class ChatResponse(BaseModel):
     choices: List[dict]
 
 class SimpleChatRequest(BaseModel):
-    message: str
-    model: Optional[str] = "gemini-2.5-pro"
-    project_id: Optional[str] = None
+    message: str = Field(..., description="用户消息内容", example="请帮我分析这个文件的内容")
+    model: Optional[str] = Field("gemini-2.5-pro", description="使用的AI模型", example="gemini-2.5-pro")
+    project_id: Optional[str] = Field("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123")
 
 class SimpleChatResponse(BaseModel):
     response: str
