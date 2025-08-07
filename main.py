@@ -7,8 +7,10 @@ Gemini CLI API 包装服务器
 新增：支持图片和文件上传功能
 """
 
-from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Form
+from fastapi import FastAPI, HTTPException, Depends, status, File, UploadFile, Form, Request
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.responses import PlainTextResponse
+from fastapi.middleware.base import BaseHTTPMiddleware
 from pydantic import BaseModel
 import subprocess
 import uuid
@@ -18,6 +20,7 @@ import os
 import tempfile
 import shutil
 import base64
+import re
 from typing import Optional, List, Dict, Union
 from contextlib import asynccontextmanager
 import uvicorn
@@ -122,7 +125,7 @@ SUPPORTED_DOCUMENT_TYPES = {
     "application/vnd.openxmlformats-officedocument.presentationml.presentation"  # pptx
 }
 
-# 最大文件大小 (20MB)
+# 最大文件大小 (10MB)
 MAX_FILE_SIZE = 20 * 1024 * 1024
 
 def validate_file(file: UploadFile) -> str:
@@ -190,6 +193,129 @@ def cleanup_temp_file(file_path: str):
     except Exception as e:
         logger.warning(f"清理临时文件失败 {file_path}: {e}")
 
+# ----------- 反爬虫配置 -------------------
+
+# 已知的爬虫User-Agent模式
+CRAWLER_USER_AGENTS = [
+    r".*bot.*", r".*crawler.*", r".*spider.*", r".*scraper.*",
+    r".*googlebot.*", r".*bingbot.*", r".*baiduspider.*", r".*yandexbot.*",
+    r".*facebookexternalhit.*", r".*twitterbot.*", r".*linkedinbot.*",
+    r".*whatsapp.*", r".*telegram.*", r".*slack.*", r".*discord.*",
+    r".*curl.*", r".*wget.*", r".*python.*", r".*requests.*",
+    r".*postman.*", r".*insomnia.*", r".*httpie.*",
+    r".*java.*", r".*apache.*", r".*nginx.*", r".*php.*",
+    r".*node.*", r".*go-http.*", r".*ruby.*", r".*perl.*"
+]
+
+# 可疑路径模式 
+SUSPICIOUS_PATHS = [
+    r"/robots\.txt", r"/sitemap\.xml", r"/favicon\.ico",
+    r"/\.well-known/.*", r"/wp-admin/.*", r"/admin/.*", r"/login.*",
+    r"/\.git.*", r"/\.svn.*", r"/\.env.*", r"/config.*",
+    r"/backup.*", r"/test.*", r"/debug.*", r"/api/v\d+/.*"
+]
+
+# 允许的路径（白名单）
+ALLOWED_PATHS = [
+    r"/", r"/docs.*", r"/redoc.*", r"/openapi\.json",
+    r"/health", r"/token", r"/v1/chat/.*", r"/chat"
+]
+
+class AntiCrawlerMiddleware(BaseHTTPMiddleware):
+    """反爬虫中间件"""
+    
+    def __init__(self, app, block_mode: str = "block"):
+        """
+        初始化反爬虫中间件
+        block_mode: 'block' - 直接拒绝, 'log' - 只记录日志但允许访问, 'rate_limit' - 限流
+        """
+        super().__init__(app)
+        self.block_mode = block_mode
+        self.blocked_ips = set()  # 被阻止的IP
+        self.request_counts = {}  # IP请求计数
+        self.last_reset = datetime.datetime.now()
+        
+    async def dispatch(self, request: Request, call_next):
+        client_ip = self.get_client_ip(request)
+        user_agent = request.headers.get("user-agent", "").lower()
+        path = request.url.path
+        
+        # 检查是否是被阻止的IP
+        if client_ip in self.blocked_ips:
+            logger.warning(f"🚫 被阻止的IP尝试访问: {client_ip} -> {path}")
+            return PlainTextResponse("Access denied", status_code=403)
+        
+        # 检查是否是爬虫
+        is_crawler = self.is_crawler_request(user_agent, path)
+        
+        if is_crawler:
+            logger.warning(f"🕷️ 检测到爬虫访问: {client_ip} | {user_agent[:50]}... | {path}")
+            
+            if self.block_mode == "block":
+                # 记录可疑IP
+                self.blocked_ips.add(client_ip)
+                return PlainTextResponse("Access denied - Automated requests not allowed", status_code=403)
+            elif self.block_mode == "rate_limit":
+                # 限流处理
+                if self.should_rate_limit(client_ip):
+                    return PlainTextResponse("Too many requests", status_code=429)
+        
+        # 正常请求处理
+        response = await call_next(request)
+        
+        # 记录可疑请求但不阻止
+        if is_crawler and self.block_mode == "log":
+            logger.info(f"📊 爬虫请求已记录但允许: {client_ip} -> {path}")
+        
+        return response
+    
+    def get_client_ip(self, request: Request) -> str:
+        """获取客户端真实IP"""
+        # 优先从代理头获取真实IP
+        forwarded_for = request.headers.get("x-forwarded-for")
+        if forwarded_for:
+            return forwarded_for.split(",")[0].strip()
+        
+        real_ip = request.headers.get("x-real-ip")
+        if real_ip:
+            return real_ip
+        
+        return request.client.host if request.client else "unknown"
+    
+    def is_crawler_request(self, user_agent: str, path: str) -> bool:
+        """判断是否是爬虫请求"""
+        # 检查User-Agent
+        for pattern in CRAWLER_USER_AGENTS:
+            if re.search(pattern, user_agent, re.IGNORECASE):
+                return True
+        
+        # 检查请求路径
+        for pattern in SUSPICIOUS_PATHS:
+            if re.search(pattern, path, re.IGNORECASE):
+                return True
+        
+        # 检查是否在白名单中
+        for pattern in ALLOWED_PATHS:
+            if re.search(pattern, path, re.IGNORECASE):
+                return False
+        
+        return False
+    
+    def should_rate_limit(self, client_ip: str) -> bool:
+        """检查是否应该限流"""
+        now = datetime.datetime.now()
+        
+        # 每小时重置计数
+        if (now - self.last_reset).total_seconds() > 3600:
+            self.request_counts.clear()
+            self.last_reset = now
+        
+        # 记录请求次数
+        self.request_counts[client_ip] = self.request_counts.get(client_ip, 0) + 1
+        
+        # 超过限制则进行限流 (每小时最多10次请求)
+        return self.request_counts[client_ip] > 10
+
 # ----------- FastAPI 启动 -------------------
 
 @asynccontextmanager
@@ -203,9 +329,20 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Gemini CLI API",
-    description="包装Gemini CLI的简单API服务，集成OAuth2密码模式 + JWT鉴权，支持图片文件上传",
+    description="包装Gemini CLI的简单API服务，集成OAuth2密码模式 + JWT鉴权，支持图片文件上传，内置反爬虫保护",
     lifespan=lifespan
 )
+
+# ----------- 反爬虫设置 -------------------
+
+# 反爬虫模式配置：
+# "block" - 直接拒绝爬虫请求 (推荐)
+# "log" - 只记录日志但允许访问 (调试用)
+# "rate_limit" - 对爬虫进行限流
+ANTI_CRAWLER_MODE = os.environ.get("ANTI_CRAWLER_MODE", "block")
+
+# 添加反爬虫中间件
+app.add_middleware(AntiCrawlerMiddleware, block_mode=ANTI_CRAWLER_MODE)
 
 class Message(BaseModel):
     role: str
@@ -238,6 +375,32 @@ class SimpleChatResponse(BaseModel):
 @app.get("/")
 async def root():
     return {"message": "Gemini CLI API 服务器运行中", "docs": "/docs"}
+
+@app.get("/robots.txt")
+async def robots_txt():
+    """返回robots.txt内容，明确拒绝所有爬虫"""
+    robots_content = """User-agent: *
+Disallow: /
+
+# This is a private API service
+# Automated crawling, scraping, or indexing is strictly prohibited
+# Violation may result in IP blocking
+"""
+    return PlainTextResponse(robots_content, media_type="text/plain")
+
+@app.get("/favicon.ico")
+async def favicon():
+    """返回404避免favicon请求日志"""
+    raise HTTPException(status_code=404, detail="Not found")
+
+@app.get("/.well-known/security.txt")
+async def security_txt():
+    """安全政策文件"""
+    security_content = """Contact: admin@yourdomain.com
+Policy: This is a private API service
+Preferred-Languages: en, zh
+"""
+    return PlainTextResponse(security_content, media_type="text/plain")
 
 @app.get("/health")
 async def health_check():
@@ -564,6 +727,43 @@ async def chat_session_completions(
         if temp_file_path:
             cleanup_temp_file(temp_file_path)
 
+# ----------- 管理接口 -------------------
+
+@app.get("/admin/blocked-ips")
+async def get_blocked_ips(current_user: User = Depends(get_current_active_user)):
+    """获取被阻止的IP列表"""
+    # 从中间件获取被阻止的IP
+    for middleware in app.user_middleware:
+        if isinstance(middleware.cls, type) and issubclass(middleware.cls, AntiCrawlerMiddleware):
+            middleware_instance = None
+            # 找到中间件实例
+            for m in app.middleware_stack.middleware:
+                if isinstance(m, AntiCrawlerMiddleware):
+                    middleware_instance = m
+                    break
+            
+            if middleware_instance:
+                return {
+                    "blocked_ips": list(middleware_instance.blocked_ips),
+                    "total_blocked": len(middleware_instance.blocked_ips),
+                    "mode": middleware_instance.block_mode
+                }
+    
+    return {"blocked_ips": [], "total_blocked": 0, "mode": ANTI_CRAWLER_MODE}
+
+@app.post("/admin/unblock-ip/{ip}")
+async def unblock_ip(ip: str, current_user: User = Depends(get_current_active_user)):
+    """解除IP封锁"""
+    # 从中间件移除被阻止的IP
+    for m in app.middleware_stack.middleware:
+        if isinstance(m, AntiCrawlerMiddleware):
+            if ip in m.blocked_ips:
+                m.blocked_ips.remove(ip)
+                logger.info(f"✅ IP {ip} 已被管理员解除封锁")
+                return {"message": f"IP {ip} 解封成功"}
+    
+    return {"message": f"IP {ip} 未在封锁列表中"}
+
 # ----------- 会话管理接口 -------------------
 
 @app.get("/v1/chat/sessions")
@@ -630,4 +830,6 @@ if __name__ == "__main__":
     print(f"   图片: {', '.join(SUPPORTED_IMAGE_TYPES)}")
     print(f"   文档: {', '.join(SUPPORTED_DOCUMENT_TYPES)}")
     print(f"📏 最大文件大小: {MAX_FILE_SIZE / 1024 / 1024:.1f}MB")
+    print()
+    print("💡 说明：如果看到 robots.txt 404 错误，这是正常现象（搜索引擎爬虫访问）")
     uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
