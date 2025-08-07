@@ -447,9 +447,9 @@ class ChatResponse(BaseModel):
     choices: List[dict]
 
 class SimpleChatRequest(BaseModel):
-    message: str = Field(..., description="用户消息内容", example="请帮我分析这个文件的内容")
-    model: Optional[str] = Field("gemini-2.5-pro", description="使用的AI模型", example="gemini-2.5-pro")
-    project_id: Optional[str] = Field("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123")
+    message: str = Field(..., description="用户消息内容")
+    model: Optional[str] = Field("gemini-2.5-pro", description="使用的AI模型")
+    project_id: Optional[str] = Field("", description="Google Cloud项目ID，留空使用默认项目")
 
 class SimpleChatResponse(BaseModel):
     response: str
@@ -504,30 +504,59 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     token = create_access_token(data={"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
+def normalize_path(path: str) -> str:
+    """标准化路径，处理相对路径和符号链接"""
+    # 移除多余的空格
+    path = path.strip()
+    
+    # 处理相对路径，默认补全为 /opt/user_data/
+    if not path.startswith('/'):
+        path = f"/opt/user_data/{path}"
+    
+    # 标准化路径，解析 . 和 .. 
+    normalized = os.path.normpath(path)
+    
+    # 解析符号链接（如果存在）
+    try:
+        if os.path.exists(normalized):
+            normalized = os.path.realpath(normalized)
+    except:
+        pass  # 如果路径不存在或无法解析，继续使用标准化后的路径
+    
+    return normalized
+
 def validate_prompt_security(prompt: str) -> str:
-    """验证prompt安全性，防止读取敏感文件"""
-    # 敏感路径模式
-    dangerous_patterns = [
-        r'/root/\.',  # /root/.bashrc, /root/.ssh等
-        r'/etc/',     # 系统配置文件
-        r'/var/log/', # 日志文件
-        r'/proc/',    # 系统进程信息
-        r'/sys/',     # 系统信息
-        r'\.ssh/',    # SSH密钥
-        r'\.env',     # 环境变量文件
-        r'password',  # 包含password的路径
-        r'secret',    # 包含secret的路径
-        r'key',       # 包含key的路径
+    """验证prompt安全性，只允许访问 /opt/user_data 目录"""
+    # 查找prompt中的文件路径
+    # 匹配常见的文件路径模式
+    path_patterns = [
+        r'(?:读取|分析|查看|打开|访问|获取)\s*([/\w\.-]+(?:\.[a-zA-Z0-9]+)?)',  # 中文动词 + 路径
+        r'(?:read|analyze|view|open|access|get)\s+([/\w\.-]+(?:\.[a-zA-Z0-9]+)?)',  # 英文动词 + 路径
+        r'([/\w\.-]+\.[a-zA-Z0-9]+)',  # 带扩展名的文件路径
+        r'(/[/\w\.-]+)',  # 绝对路径
     ]
     
-    # 检查prompt中是否包含敏感路径
-    for pattern in dangerous_patterns:
-        if re.search(pattern, prompt, re.IGNORECASE):
-            logger.warning(f"🚨 检测到敏感路径访问尝试: {pattern}")
+    found_paths = []
+    for pattern in path_patterns:
+        matches = re.findall(pattern, prompt, re.IGNORECASE)
+        found_paths.extend(matches)
+    
+    # 验证每个找到的路径
+    for path in found_paths:
+        if not path or len(path.strip()) < 2:
+            continue
+            
+        normalized_path = normalize_path(path)
+        
+        # 检查路径是否在允许的目录内
+        if not normalized_path.startswith('/opt/user_data/'):
+            logger.warning(f"🚨 检测到非法路径访问尝试: {path} -> {normalized_path}")
             raise HTTPException(
                 status_code=403, 
-                detail=f"安全限制：不允许访问敏感路径。仅允许访问 /opt/files 目录下的文件。"
+                detail=f"安全限制：不允许访问路径 '{path}'。仅允许访问 /opt/user_data 目录下的文件。"
             )
+        
+        logger.info(f"✅ 路径验证通过: {path} -> {normalized_path}")
     
     return prompt
 
@@ -548,16 +577,21 @@ def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_i
             'HOME': os.path.expanduser('~'),
         })
         
-        # 构建命令 - 使用--include-directories参数让gemini可以访问文件目录
+        # 构建命令 - 使用--include-directories参数让gemini可以访问文件目录和用户数据目录
+        include_dirs = ["/opt/user_data"]  # 始终包含用户数据目录
+        
         if file_path:
             # 获取文件所在目录
             file_dir = os.path.dirname(file_path)
-            # 使用--include-directories参数让gemini可以访问文件目录
+            if file_dir not in include_dirs:
+                include_dirs.append(file_dir)
+            # 使用--include-directories参数让gemini可以访问文件目录和用户数据目录
             enhanced_prompt = f"{safe_prompt} {file_path}"
-            shell_command = f'gemini -m "{model}" -p "{enhanced_prompt}" --include-directories "{file_dir}"'
+            include_dirs_str = " ".join([f'--include-directories "{d}"' for d in include_dirs])
+            shell_command = f'gemini -m "{model}" -p "{enhanced_prompt}" {include_dirs_str}'
         else:
-            # 没有文件时，使用原来的方式
-            shell_command = f'gemini -m "{model}" -p "{safe_prompt}"'
+            # 没有文件时，仍然包含用户数据目录
+            shell_command = f'gemini -m "{model}" -p "{safe_prompt}" --include-directories "/opt/user_data"'
         
         logger.info(f"执行命令: {shell_command[:100]}...")
         
@@ -587,7 +621,7 @@ def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_i
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
-    messages: str = Form(..., description="[{'role':'user','content':'你好，请介绍一下自己'}]"),
+    messages: str = Form(..., description='[{"role":"user","content":"你好，请介绍一下自己"}]'),
     model: str = Form("gemini-2.5-pro", description="选择gemini模型"),
     temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
     max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
@@ -613,9 +647,9 @@ async def chat_completions(
         
         prompt = user_messages[-1].get("content", "")
         
-        # 处理文件
+        # 处理文件 - 检查文件是否真正存在且有内容
         temp_file_path = None
-        if file and file.filename and file.filename.strip():
+        if file and hasattr(file, 'filename') and file.filename and file.filename.strip():
             try:
                 file_type = validate_file(file)
                 temp_file_path = await save_temp_file(file)
@@ -672,17 +706,25 @@ async def simple_chat(
     temp_file_path = None
     
     try:
-        # 处理文件
-        if file:
-            file_type = validate_file(file)
-            temp_file_path = await save_temp_file(file)
-            logger.info(f"已保存临时文件: {temp_file_path}, 类型: {file_type}")
-            
-            # 为文件添加描述到message
-            if file_type == "image":
-                message = f"请分析这张图片。用户的问题是：{message}" if message else "请描述这张图片的内容"
-            else:
-                message = f"请分析这个文档。用户的问题是：{message}" if message else "请总结这个文档的内容"
+        # 处理文件 - 检查文件是否真正存在且有内容
+        if file and hasattr(file, 'filename') and file.filename and file.filename.strip():
+            try:
+                file_type = validate_file(file)
+                temp_file_path = await save_temp_file(file)
+                logger.info(f"已保存临时文件: {temp_file_path}, 类型: {file_type}")
+                
+                # 为文件添加描述到message
+                if file_type == "image":
+                    message = f"请分析这张图片。用户的问题是：{message}" if message else "请描述这张图片的内容"
+                else:
+                    message = f"请分析这个文档。用户的问题是：{message}" if message else "请总结这个文档的内容"
+            except Exception as e:
+                logger.error(f"文件处理失败: {e}")
+                return SimpleChatResponse(
+                    response="", 
+                    status="error", 
+                    error=f"文件处理失败: {str(e)}"
+                )
         
         # 执行Gemini命令
         output, error, return_code = execute_gemini_command(message, model, project_id, temp_file_path)
@@ -748,7 +790,7 @@ def ensure_sessions_limit():
 @app.post("/v1/chat/sessions/{session_id}/completions")
 async def chat_session_completions(
     session_id: str = Path(..., description="会话ID，用于标识多轮对话"),
-    messages: str = Form(..., description="[{'role':'user','content':'继续我们之前的对话'}]"),
+    messages: str = Form(..., description='[{"role":"user","content":"继续我们之前的对话"}]'),
     model: str = Form("gemini-2.5-pro", description="使用的AI模型"),
     temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
     max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
@@ -800,7 +842,7 @@ async def chat_session_completions(
                 current_prompt = user_messages[-1]["content"]
         
         file_status = None
-        if file and file.filename and file.filename.strip():
+        if file and hasattr(file, 'filename') and file.filename and file.filename.strip():
             try:
                 file_type = validate_file(file)
                 temp_file_path, file_status = await save_session_file(file, session_id)
