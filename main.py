@@ -122,19 +122,19 @@ SUPPORTED_DOCUMENT_TYPES = {
     "text/x-python", "application/javascript", "application/typescript", "text/x-java-source",
     "text/x-csrc", "text/x-c++src", "text/x-go", "application/x-sh", "application/x-httpd-php",
     "application/x-ruby", "text/rust",  # Rust 没有统一标准 MIME，可视实际使用情况调整
-    
+
     # 其他文档格式
-    "application/json", "application/pdf", "application/rtf", "application/x-yaml",
-    "text/plain", "text/markdown", "text/csv", "text/html", "text/xml", "text/yaml", 
+    "application/json", "application/pdf", "application/rtf",
+    "text/plain", "text/markdown", "text/csv", "text/html", "text/xml", "application/octet-stream",
 
     # 办公文档格式
-    "application/msword",  "application/vnd.ms-excel", "application/vnd.ms-powerpoint",  # doc, xls, ppt
+    "application/msword", "application/vnd.ms-excel", "application/vnd.ms-powerpoint",  # doc, xls, ppt
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # xlsx
     "application/vnd.openxmlformats-officedocument.presentationml.presentation"  # pptx
 }
 
-# 最大文件大小 (10MB)
+# 最大文件大小 (20MB)
 MAX_FILE_SIZE = 20 * 1024 * 1024
 
 def validate_file(file: UploadFile) -> str:
@@ -158,14 +158,41 @@ def validate_file(file: UploadFile) -> str:
     
     return "image" if file.content_type in SUPPORTED_IMAGE_TYPES else "document"
 
-async def save_temp_file(file: UploadFile) -> str:
-    """保存临时文件并返回路径"""
-    # 创建临时文件
-    suffix = ""
-    if file.filename:
-        suffix = os.path.splitext(file.filename)[1]
+async def save_session_file(file: UploadFile, session_id: str) -> tuple[str, str]:
+    """为会话保存文件，支持同名文件智能处理"""
+    # 创建会话专用的临时目录
+    session_temp_dir = os.path.join(tempfile.gettempdir(), f"gemini_session_{session_id}")
+    os.makedirs(session_temp_dir, exist_ok=True)
     
-    temp_fd, temp_path = tempfile.mkstemp(suffix=suffix)
+    original_name = file.filename or "uploaded_file"
+    
+    # 检查会话中是否已存在同名文件
+    if session_id in sessions and original_name in sessions[session_id].uploaded_files:
+        existing_path = sessions[session_id].uploaded_files[original_name]
+        
+        # 检查现有文件是否还存在
+        if os.path.exists(existing_path):
+            # 比较文件内容是否相同
+            content = await file.read()
+            await file.seek(0)  # 重置文件指针
+            
+            try:
+                with open(existing_path, 'rb') as existing_file:
+                    existing_content = existing_file.read()
+                
+                if content == existing_content:
+                    logger.info(f"文件内容相同，复用现有文件: {existing_path}")
+                    return existing_path, "reused"
+                else:
+                    logger.info(f"同名文件内容不同，将覆盖: {original_name}")
+                    # 删除旧文件
+                    cleanup_temp_file(existing_path)
+            except Exception as e:
+                logger.warning(f"读取现有文件失败: {e}")
+    
+    # 生成新的文件路径
+    name, ext = os.path.splitext(original_name)
+    temp_path = os.path.join(session_temp_dir, original_name)
     
     try:
         # 写入文件内容
@@ -173,22 +200,67 @@ async def save_temp_file(file: UploadFile) -> str:
         
         # 检查实际文件大小
         if len(content) > MAX_FILE_SIZE:
-            os.close(temp_fd)
-            os.unlink(temp_path)
             raise HTTPException(
                 status_code=413, 
                 detail=f"文件大小超过限制 {MAX_FILE_SIZE / 1024 / 1024:.1f}MB"
             )
         
-        with os.fdopen(temp_fd, 'wb') as temp_file:
+        with open(temp_path, 'wb') as temp_file:
             temp_file.write(content)
         
+        # 更新会话文件映射
+        if session_id in sessions:
+            sessions[session_id].uploaded_files[original_name] = temp_path
+        
+        logger.info(f"文件已保存: {temp_path} (原名: {original_name})")
+        return temp_path, "new"
+    except Exception as e:
+        # 清理失败的文件
+        try:
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
+        except:
+            pass
+        raise e
+
+async def save_temp_file(file: UploadFile, session_id: str = None) -> str:
+    """保存临时文件并返回路径，支持会话隔离"""
+    if session_id:
+        # 对于会话文件，使用智能处理
+        file_path, _ = await save_session_file(file, session_id)
+        return file_path
+    
+    # 非会话文件，使用原来的逻辑
+    base_dir = tempfile.gettempdir()
+    
+    # 生成唯一文件名，避免同名文件冲突
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
+    original_name = file.filename or "uploaded_file"
+    name, ext = os.path.splitext(original_name)
+    unique_filename = f"{name}_{timestamp}{ext}"
+    temp_path = os.path.join(base_dir, unique_filename)
+    
+    try:
+        # 写入文件内容
+        content = await file.read()
+        
+        # 检查实际文件大小
+        if len(content) > MAX_FILE_SIZE:
+            raise HTTPException(
+                status_code=413, 
+                detail=f"文件大小超过限制 {MAX_FILE_SIZE / 1024 / 1024:.1f}MB"
+            )
+        
+        with open(temp_path, 'wb') as temp_file:
+            temp_file.write(content)
+        
+        logger.info(f"文件已保存: {temp_path} (原名: {original_name})")
         return temp_path
     except Exception as e:
         # 清理失败的文件
         try:
-            os.close(temp_fd)
-            os.unlink(temp_path)
+            if os.path.exists(temp_path):
+                os.unlink(temp_path)
         except:
             pass
         raise e
@@ -429,7 +501,7 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     token = create_access_token(data={"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_id: str = None, file_path: str = None) -> tuple[str, str, int]:
+def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_id: Optional[str] = None, file_path: Optional[str] = None) -> tuple[str, str, int]:
     """执行Gemini CLI命令，支持文件输入"""
     try:
         current_project = project_id or DEFAULT_PROJECT_ID
@@ -443,13 +515,14 @@ def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_i
             'HOME': os.path.expanduser('~'),
         })
         
-        # 构建命令
+        # 构建命令 - 根据用户测试结果，改为直接在prompt中指定文件路径
         if file_path:
-            # 有文件时，使用文件作为输入
-            shell_command = f'gemini -m "{model}" -p "{prompt}" < "{file_path}"'
+            # 有文件时，直接在prompt中包含文件路径，这样gemini可以正确读取
+            enhanced_prompt = f"{prompt} {file_path}"
+            shell_command = f'gemini -m "{model}" -p "{enhanced_prompt}"'
         else:
             # 没有文件时，使用原来的方式
-            shell_command = f'echo "" | gemini -m "{model}" -p "{prompt}"'
+            shell_command = f'gemini -m "{model}" -p "{prompt}"'
         
         logger.info(f"执行命令: {shell_command[:100]}...")
         
@@ -604,7 +677,13 @@ async def simple_chat(
 # ----------- 多轮对话会话接口 -------------------
 
 # 会话存储结构
-sessions: Dict[str, Dict[str, object]] = {}
+class SessionData:
+    def __init__(self):
+        self.messages: List[Dict[str, str]] = []
+        self.last_update: datetime.datetime = datetime.datetime.utcnow()
+        self.uploaded_files: Dict[str, str] = {}  # 原文件名 -> 实际存储路径的映射
+
+sessions: Dict[str, SessionData] = {}
 
 MAX_SESSION_MESSAGES = 20      # 最多20轮对话
 SESSION_TIMEOUT_SECONDS = 600  # 10分钟未更新即过期
@@ -613,7 +692,7 @@ MAX_ACTIVE_SESSIONS = 5        # 最大5个会话
 def cleanup_expired_sessions():
     now = datetime.datetime.utcnow()
     expired_sessions = [sid for sid, data in sessions.items()
-                        if (now - data["last_update"]).total_seconds() > SESSION_TIMEOUT_SECONDS]
+                        if (now - data.last_update).total_seconds() > SESSION_TIMEOUT_SECONDS]
     for sid in expired_sessions:
         logger.info(f"清理过期会话: {sid}")
         del sessions[sid]
@@ -622,7 +701,7 @@ def ensure_sessions_limit():
     if len(sessions) <= MAX_ACTIVE_SESSIONS:
         return
     # 按最后更新时间排序，删除最早的会话
-    sorted_sessions = sorted(sessions.items(), key=lambda x: x[1]["last_update"])
+    sorted_sessions = sorted(sessions.items(), key=lambda x: x[1].last_update)
     for sid, _ in sorted_sessions[:len(sessions) - MAX_ACTIVE_SESSIONS]:
         logger.info(f"清理超出数量限制会话: {sid}")
         del sessions[sid]
@@ -658,7 +737,7 @@ async def chat_session_completions(
         if session_id not in sessions:
             if len(sessions) >= MAX_ACTIVE_SESSIONS:
                 raise HTTPException(status_code=429, detail="会话数量已达上限，请稍后重试")
-            sessions[session_id] = {"messages": [], "last_update": datetime.datetime.utcnow()}
+            sessions[session_id] = SessionData()
 
         # 添加新消息到会话
         session_messages = []
@@ -666,13 +745,13 @@ async def chat_session_completions(
             if isinstance(msg, dict) and "role" in msg and "content" in msg:
                 session_messages.append({"role": msg["role"], "content": msg["content"]})
         
-        sessions[session_id]["messages"].extend(session_messages)
+        sessions[session_id].messages.extend(session_messages)
         
         # 保持会话轮数限制
-        if len(sessions[session_id]["messages"]) > MAX_SESSION_MESSAGES:
-            sessions[session_id]["messages"] = sessions[session_id]["messages"][-MAX_SESSION_MESSAGES:]
+        if len(sessions[session_id].messages) > MAX_SESSION_MESSAGES:
+            sessions[session_id].messages = sessions[session_id].messages[-MAX_SESSION_MESSAGES:]
 
-        sessions[session_id]["last_update"] = datetime.datetime.utcnow()
+        sessions[session_id].last_update = datetime.datetime.utcnow()
 
         # 处理文件
         current_prompt = ""
@@ -681,10 +760,17 @@ async def chat_session_completions(
             if user_messages:
                 current_prompt = user_messages[-1]["content"]
         
+        file_status = None
         if file:
             file_type = validate_file(file)
-            temp_file_path = await save_temp_file(file)
-            logger.info(f"已保存临时文件: {temp_file_path}, 类型: {file_type}")
+            temp_file_path, file_status = await save_session_file(file, session_id)
+            
+            status_msg = {
+                "new": "已保存新文件",
+                "reused": "复用现有同名文件（内容相同）"
+            }.get(file_status, "已处理文件")
+            
+            logger.info(f"{status_msg}: {temp_file_path}, 类型: {file_type}")
             
             # 为文件添加描述
             if file_type == "image":
@@ -693,7 +779,7 @@ async def chat_session_completions(
                 current_prompt = f"请分析这个文档。用户的问题是：{current_prompt}" if current_prompt else "请总结这个文档的内容"
 
         # 构造完整的对话上下文
-        context_prompt = "\n".join([f"{msg['role']}: {msg['content']}" for msg in sessions[session_id]["messages"]])
+        context_prompt = "\n".join([f"{msg['role']}: {msg['content']}" for msg in sessions[session_id].messages])
         
         # 如果有文件，使用当前处理后的prompt；否则使用完整上下文
         final_prompt = current_prompt if file else context_prompt
@@ -705,8 +791,8 @@ async def chat_session_completions(
             raise HTTPException(status_code=500, detail=f"Gemini CLI error: {error}")
 
         # 将AI回复添加到会话
-        sessions[session_id]["messages"].append({"role": "assistant", "content": output})
-        sessions[session_id]["last_update"] = datetime.datetime.utcnow()
+        sessions[session_id].messages.append({"role": "assistant", "content": output})
+        sessions[session_id].last_update = datetime.datetime.utcnow()
 
         return {
             "id": str(uuid.uuid4()),
@@ -721,7 +807,7 @@ async def chat_session_completions(
                 "finish_reason": "stop"
             }],
             "session_info": {
-                "message_count": len(sessions[session_id]["messages"]),
+                "message_count": len(sessions[session_id].messages),
                 "max_messages": MAX_SESSION_MESSAGES
             },
             "file_processed": file.filename if file else None
@@ -784,9 +870,9 @@ async def list_sessions(current_user: User = Depends(get_current_active_user)):
     for sid, data in sessions.items():
         session_info.append({
             "session_id": sid,
-            "message_count": len(data["messages"]),
-            "last_update": data["last_update"].isoformat(),
-            "expires_in_seconds": max(0, SESSION_TIMEOUT_SECONDS - int((datetime.datetime.utcnow() - data["last_update"]).total_seconds()))
+            "message_count": len(data.messages),
+            "last_update": data.last_update.isoformat(),
+            "expires_in_seconds": max(0, SESSION_TIMEOUT_SECONDS - int((datetime.datetime.utcnow() - data.last_update).total_seconds()))
         })
     
     return {
@@ -813,10 +899,43 @@ async def get_session(session_id: str, current_user: User = Depends(get_current_
     session_data = sessions[session_id]
     return {
         "session_id": session_id,
-        "messages": session_data["messages"],
-        "message_count": len(session_data["messages"]),
-        "last_update": session_data["last_update"].isoformat(),
-        "expires_in_seconds": max(0, SESSION_TIMEOUT_SECONDS - int((datetime.datetime.utcnow() - session_data["last_update"]).total_seconds()))
+        "messages": session_data.messages,
+        "message_count": len(session_data.messages),
+        "last_update": session_data.last_update.isoformat(),
+        "expires_in_seconds": max(0, SESSION_TIMEOUT_SECONDS - int((datetime.datetime.utcnow() - session_data.last_update).total_seconds())),
+        "uploaded_files": list(session_data.uploaded_files.keys())
+    }
+
+@app.get("/v1/chat/sessions/{session_id}/files")
+async def list_session_files(session_id: str, current_user: User = Depends(get_current_active_user)):
+    """列出会话中上传的文件"""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    
+    session_data = sessions[session_id]
+    file_info = []
+    
+    for filename, filepath in session_data.uploaded_files.items():
+        file_exists = os.path.exists(filepath)
+        file_size = 0
+        if file_exists:
+            try:
+                file_size = os.path.getsize(filepath)
+            except:
+                pass
+        
+        file_info.append({
+            "filename": filename,
+            "path": filepath,
+            "exists": file_exists,
+            "size_bytes": file_size,
+            "size_mb": round(file_size / 1024 / 1024, 2) if file_size > 0 else 0
+        })
+    
+    return {
+        "session_id": session_id,
+        "files": file_info,
+        "total_files": len(file_info)
     }
 
 # ----------- CORS 和启动 -------------------
