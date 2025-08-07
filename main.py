@@ -118,8 +118,17 @@ SUPPORTED_IMAGE_TYPES = {
 
 # 支持的文档格式
 SUPPORTED_DOCUMENT_TYPES = {
-    "text/plain", "text/markdown", "text/csv", "text/html", "text/xml",
-    "application/json", "application/pdf", "application/rtf",
+    # 编程语言代码文件
+    "text/x-python", "application/javascript", "application/typescript", "text/x-java-source",
+    "text/x-csrc", "text/x-c++src", "text/x-go", "application/x-sh", "application/x-httpd-php",
+    "application/x-ruby", "text/rust",  # Rust 没有统一标准 MIME，可视实际使用情况调整
+    
+    # 其他文档格式
+    "application/json", "application/pdf", "application/rtf", "application/x-yaml",
+    "text/plain", "text/markdown", "text/csv", "text/html", "text/xml", "text/yaml", 
+
+    # 办公文档格式
+    "application/msword",  "application/vnd.ms-excel", "application/vnd.ms-powerpoint",  # doc, xls, ppt
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",  # docx
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",  # xlsx
     "application/vnd.openxmlformats-officedocument.presentationml.presentation"  # pptx
