@@ -587,8 +587,8 @@ def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_i
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
-    messages: str = Form(..., description="[{"role":"user","content":"你好，请介绍一下自己"}]"),
-    model: str = Form("gemini-2.5-pro", description="选择gemini模型",
+    messages: str = Form(..., description="[{'role':'user','content':'你好，请介绍一下自己'}]"),
+    model: str = Form("gemini-2.5-pro", description="选择gemini模型"),
     temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
     max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
     project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
@@ -748,7 +748,7 @@ def ensure_sessions_limit():
 @app.post("/v1/chat/sessions/{session_id}/completions")
 async def chat_session_completions(
     session_id: str = Path(..., description="会话ID，用于标识多轮对话"),
-    messages: str = Form(..., description="[{"role":"user","content":"继续我们之前的对话"}]"),
+    messages: str = Form(..., description="[{'role':'user','content':'继续我们之前的对话'}]"),
     model: str = Form("gemini-2.5-pro", description="使用的AI模型"),
     temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
     max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
