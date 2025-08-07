@@ -160,8 +160,9 @@ def validate_file(file: UploadFile) -> str:
 
 async def save_session_file(file: UploadFile, session_id: str) -> tuple[str, str]:
     """为会话保存文件，支持同名文件智能处理"""
-    # 创建会话专用的临时目录
-    session_temp_dir = os.path.join(tempfile.gettempdir(), f"gemini_session_{session_id}")
+    # 使用安全的目录，避免让gemini访问敏感的/root目录
+    safe_dir = "/opt/files"  # 使用专门的安全目录
+    session_temp_dir = os.path.join(safe_dir, f"session_{session_id}")
     os.makedirs(session_temp_dir, exist_ok=True)
     
     original_name = file.filename or "uploaded_file"
@@ -230,15 +231,17 @@ async def save_temp_file(file: UploadFile, session_id: str = None) -> str:
         file_path, _ = await save_session_file(file, session_id)
         return file_path
     
-    # 非会话文件，使用原来的逻辑
-    base_dir = tempfile.gettempdir()
+    # 非会话文件，保存到安全目录
+    safe_dir = "/opt/files"  # 使用专门的安全目录
+    temp_dir = os.path.join(safe_dir, "temp")
+    os.makedirs(temp_dir, exist_ok=True)
     
     # 生成唯一文件名，避免同名文件冲突
     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S_%f")
     original_name = file.filename or "uploaded_file"
     name, ext = os.path.splitext(original_name)
     unique_filename = f"{name}_{timestamp}{ext}"
-    temp_path = os.path.join(base_dir, unique_filename)
+    temp_path = os.path.join(temp_dir, unique_filename)
     
     try:
         # 写入文件内容
@@ -515,11 +518,13 @@ def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_i
             'HOME': os.path.expanduser('~'),
         })
         
-        # 构建命令 - 根据用户测试结果，改为直接在prompt中指定文件路径
+        # 构建命令 - 使用--include-directories参数让gemini可以访问文件目录
         if file_path:
-            # 有文件时，直接在prompt中包含文件路径，这样gemini可以正确读取
+            # 获取文件所在目录
+            file_dir = os.path.dirname(file_path)
+            # 使用--include-directories参数让gemini可以访问文件目录
             enhanced_prompt = f"{prompt} {file_path}"
-            shell_command = f'gemini -m "{model}" -p "{enhanced_prompt}"'
+            shell_command = f'gemini -m "{model}" -p "{enhanced_prompt}" --include-directories "{file_dir}"'
         else:
             # 没有文件时，使用原来的方式
             shell_command = f'gemini -m "{model}" -p "{prompt}"'
