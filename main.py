@@ -526,7 +526,7 @@ def normalize_path(path: str) -> str:
     return normalized
 
 def validate_prompt_security(prompt: str) -> str:
-    """验证prompt安全性，只允许访问 /opt/user_data 目录"""
+    """验证prompt安全性，允许访问 /opt/user_data 和 /opt/files 目录"""
     # 查找prompt中的文件路径
     # 匹配常见的文件路径模式
     path_patterns = [
@@ -541,6 +541,9 @@ def validate_prompt_security(prompt: str) -> str:
         matches = re.findall(pattern, prompt, re.IGNORECASE)
         found_paths.extend(matches)
     
+    # 允许的目录列表
+    allowed_directories = ['/opt/user_data/', '/opt/files/']
+    
     # 验证每个找到的路径
     for path in found_paths:
         if not path or len(path.strip()) < 2:
@@ -549,11 +552,13 @@ def validate_prompt_security(prompt: str) -> str:
         normalized_path = normalize_path(path)
         
         # 检查路径是否在允许的目录内
-        if not normalized_path.startswith('/opt/user_data/'):
+        is_allowed = any(normalized_path.startswith(allowed_dir) for allowed_dir in allowed_directories)
+        
+        if not is_allowed:
             logger.warning(f"🚨 检测到非法路径访问尝试: {path} -> {normalized_path}")
             raise HTTPException(
                 status_code=403, 
-                detail=f"安全限制：不允许访问路径 '{path}'。仅允许访问 /opt/user_data 目录下的文件。"
+                detail=f"安全限制：不允许访问路径 '{path}'。仅允许访问 /opt/user_data 和 /opt/files 目录下的文件。"
             )
         
         logger.info(f"✅ 路径验证通过: {path} -> {normalized_path}")
@@ -626,7 +631,7 @@ async def chat_completions(
     temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
     max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
     project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
-    file: Optional[UploadFile] = File(default=None, description="可选：上传20MB以内的图片或文档文件"),
+    file: Optional[UploadFile] = File(None, description="可选：上传20MB以内的图片或文档文件"),
     current_user: User = Depends(get_current_active_user)
 ):
     """OpenAI兼容的聊天完成接口，支持文件上传"""
@@ -699,7 +704,7 @@ async def simple_chat(
     message: str = Form(..., description="用户消息内容"),
     model: str = Form("gemini-2.5-pro", description="使用的AI模型"),
     project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
-    file: Optional[UploadFile] = File(default=None, description="可选：上传20MB以内的图片或文档文件"),
+    file: Optional[UploadFile] = File(None, description="可选：上传20MB以内的图片或文档文件"),
     current_user: User = Depends(get_current_active_user)
 ):
     """简单的聊天接口，支持文件上传"""
@@ -795,7 +800,7 @@ async def chat_session_completions(
     temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
     max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
     project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
-    file: Optional[UploadFile] = File(default=None, description="可选：上传20MB以内的图片或文档文件"),
+    file: Optional[UploadFile] = File(None, description="可选：上传20MB以内的图片或文档文件"),
     current_user: User = Depends(get_current_active_user),
 ):
     """支持多轮会话的对话接口，支持文件上传"""
