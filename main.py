@@ -526,7 +526,7 @@ def validate_prompt_security(prompt: str) -> str:
             logger.warning(f"🚨 检测到敏感路径访问尝试: {pattern}")
             raise HTTPException(
                 status_code=403, 
-                detail=f"安全限制：不允许访问敏感路径。仅允许访问 /tmp 和 /opt/files 目录下的文件。"
+                detail=f"安全限制：不允许访问敏感路径。仅允许访问 /opt/files 目录下的文件。"
             )
     
     return prompt
@@ -587,12 +587,12 @@ def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_i
 
 @app.post("/v1/chat/completions")
 async def chat_completions(
-    messages: str = Form(..., description="JSON格式的消息数组", example='[{"role":"user","content":"你好，请介绍一下自己"}]'),
-    model: str = Form("gemini-2.5-pro", description="使用的AI模型", example="gemini-2.5-pro"),
-    temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", example=0.7, ge=0.0, le=1.0),
-    max_tokens: int = Form(1000, description="最大生成token数量", example=1000, ge=1, le=8192),
-    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123"),
-    file: Optional[UploadFile] = File(default=None, description="可选：上传的图片或文档文件（支持jpg,png,pdf,txt等）"),
+    messages: str = Form(..., description="[{"role":"user","content":"你好，请介绍一下自己"}]"),
+    model: str = Form("gemini-2.5-pro", description="选择gemini模型",
+    temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
+    max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
+    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
+    file: Optional[UploadFile] = File(default=None, description="可选：上传20MB以内的图片或文档文件"),
     current_user: User = Depends(get_current_active_user)
 ):
     """OpenAI兼容的聊天完成接口，支持文件上传"""
@@ -615,16 +615,20 @@ async def chat_completions(
         
         # 处理文件
         temp_file_path = None
-        if file:
-            file_type = validate_file(file)
-            temp_file_path = await save_temp_file(file)
-            logger.info(f"已保存临时文件: {temp_file_path}, 类型: {file_type}")
-            
-            # 为文件添加描述到prompt
-            if file_type == "image":
-                prompt = f"请分析这张图片。用户的问题是：{prompt}" if prompt else "请描述这张图片的内容"
-            else:
-                prompt = f"请分析这个文档。用户的问题是：{prompt}" if prompt else "请总结这个文档的内容"
+        if file and file.filename and file.filename.strip():
+            try:
+                file_type = validate_file(file)
+                temp_file_path = await save_temp_file(file)
+                logger.info(f"已保存临时文件: {temp_file_path}, 类型: {file_type}")
+                
+                # 为文件添加描述到prompt
+                if file_type == "image":
+                    prompt = f"请分析这张图片。用户的问题是：{prompt}" if prompt else "请描述这张图片的内容"
+                else:
+                    prompt = f"请分析这个文档。用户的问题是：{prompt}" if prompt else "请总结这个文档的内容"
+            except Exception as e:
+                logger.error(f"文件处理失败: {e}")
+                raise HTTPException(status_code=400, detail=f"文件处理失败: {str(e)}")
         
         try:
             # 执行Gemini命令
@@ -658,10 +662,10 @@ async def chat_completions(
 
 @app.post("/chat", response_model=SimpleChatResponse)
 async def simple_chat(
-    message: str = Form(..., description="用户消息内容", example="请帮我分析这个文件的内容"),
-    model: str = Form("gemini-2.5-pro", description="使用的AI模型", example="gemini-2.5-pro"),
-    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123"),
-    file: Optional[UploadFile] = File(default=None, description="可选：上传的图片或文档文件（最大20MB，支持jpg,png,pdf,docx,txt等）"),
+    message: str = Form(..., description="用户消息内容"),
+    model: str = Form("gemini-2.5-pro", description="使用的AI模型"),
+    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
+    file: Optional[UploadFile] = File(default=None, description="可选：上传20MB以内的图片或文档文件"),
     current_user: User = Depends(get_current_active_user)
 ):
     """简单的聊天接口，支持文件上传"""
@@ -743,13 +747,13 @@ def ensure_sessions_limit():
 
 @app.post("/v1/chat/sessions/{session_id}/completions")
 async def chat_session_completions(
-    session_id: str = Path(..., description="会话ID，用于标识多轮对话", example="session_123"),
-    messages: str = Form(..., description="JSON格式的消息数组", example='[{"role":"user","content":"继续我们之前的对话"}]'),
-    model: str = Form("gemini-2.5-pro", description="使用的AI模型", example="gemini-2.5-pro"),
-    temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", example=0.7, ge=0.0, le=1.0),
-    max_tokens: int = Form(1000, description="最大生成token数量", example=1000, ge=1, le=8192),
-    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目", example="my-project-123"),
-    file: Optional[UploadFile] = File(default=None, description="可选：上传的图片或文档文件（最大20MB，支持jpg,png,pdf,docx,txt等，同名文件会智能处理）"),
+    session_id: str = Path(..., description="会话ID，用于标识多轮对话"),
+    messages: str = Form(..., description="[{"role":"user","content":"继续我们之前的对话"}]"),
+    model: str = Form("gemini-2.5-pro", description="使用的AI模型"),
+    temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
+    max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
+    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
+    file: Optional[UploadFile] = File(default=None, description="可选：上传20MB以内的图片或文档文件"),
     current_user: User = Depends(get_current_active_user),
 ):
     """支持多轮会话的对话接口，支持文件上传"""
@@ -796,22 +800,26 @@ async def chat_session_completions(
                 current_prompt = user_messages[-1]["content"]
         
         file_status = None
-        if file:
-            file_type = validate_file(file)
-            temp_file_path, file_status = await save_session_file(file, session_id)
-            
-            status_msg = {
-                "new": "已保存新文件",
-                "reused": "复用现有同名文件（内容相同）"
-            }.get(file_status, "已处理文件")
-            
-            logger.info(f"{status_msg}: {temp_file_path}, 类型: {file_type}")
-            
-            # 为文件添加描述
-            if file_type == "image":
-                current_prompt = f"请分析这张图片。用户的问题是：{current_prompt}" if current_prompt else "请描述这张图片的内容"
-            else:
-                current_prompt = f"请分析这个文档。用户的问题是：{current_prompt}" if current_prompt else "请总结这个文档的内容"
+        if file and file.filename and file.filename.strip():
+            try:
+                file_type = validate_file(file)
+                temp_file_path, file_status = await save_session_file(file, session_id)
+                
+                status_msg = {
+                    "new": "已保存新文件",
+                    "reused": "复用现有同名文件（内容相同）"
+                }.get(file_status, "已处理文件")
+                
+                logger.info(f"{status_msg}: {temp_file_path}, 类型: {file_type}")
+                
+                # 为文件添加描述
+                if file_type == "image":
+                    current_prompt = f"请分析这张图片。用户的问题是：{current_prompt}" if current_prompt else "请描述这张图片的内容"
+                else:
+                    current_prompt = f"请分析这个文档。用户的问题是：{current_prompt}" if current_prompt else "请总结这个文档的内容"
+            except Exception as e:
+                logger.error(f"文件处理失败: {e}")
+                raise HTTPException(status_code=400, detail=f"文件处理失败: {str(e)}")
 
         # 构造完整的对话上下文
         context_prompt = "\n".join([f"{msg['role']}: {msg['content']}" for msg in sessions[session_id].messages])
