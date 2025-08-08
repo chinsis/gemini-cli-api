@@ -21,12 +21,22 @@ import tempfile
 import shutil
 import base64
 import re
-from typing import Optional, List, Dict, Union, Any
+from typing import Optional, List, Dict, Union, Any, Set
 from contextlib import asynccontextmanager
 import uvicorn
 
 from jose import JWTError, jwt
 from passlib.context import CryptContext
+
+# 会话存储结构
+class SessionData:
+    def __init__(self):
+        self.messages: List[Dict[str, str]] = []
+        self.last_update: datetime.datetime = datetime.datetime.utcnow()
+        self.uploaded_files: Dict[str, str] = {}  # 原文件名 -> 实际存储路径的映射
+
+# 全局会话字典
+sessions: Dict[str, SessionData] = {}
 
 # 日志
 logging.basicConfig(level=logging.INFO)
@@ -52,6 +62,29 @@ fake_users_db = {
         "disabled": False,
     }
 }
+
+tags_metadata = [
+    {
+        "name": "系统信息",
+        "description": "系统信息及健康检查",
+    },
+    {
+        "name": "用户认证",
+        "description": "获取token",
+    },
+    {
+        "name": "对话",
+        "description": "与Gemini 进行对话",
+    },
+    {
+        "name": "会话管理",
+        "description": "管理用户会话",
+    },
+    {
+        "name": "反爬虫机制",
+        "description": "反爬虫策略",
+    }
+]
 
 class Token(BaseModel):
     access_token: str
@@ -414,6 +447,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Gemini CLI API",
     description="包装Gemini CLI的简单API服务，集成OAuth2密码模式 + JWT鉴权，支持图片文件上传，内置反爬虫保护",
+    tags_metadata=tags_metadata,
     lifespan=lifespan
 )
 
@@ -456,37 +490,12 @@ class SimpleChatResponse(BaseModel):
     status: str
     error: Optional[str] = None
 
-@app.get("/")
+@app.get("/", tags=["系统信息"])
 async def root():
     return {"message": "Gemini CLI API 服务器运行中", "docs": "/docs"}
 
-@app.get("/robots.txt")
-async def robots_txt():
-    """返回robots.txt内容，明确拒绝所有爬虫"""
-    robots_content = """User-agent: *
-Disallow: /
 
-# This is a private API service
-# Automated crawling, scraping, or indexing is strictly prohibited
-# Violation may result in IP blocking
-"""
-    return PlainTextResponse(robots_content, media_type="text/plain")
-
-@app.get("/favicon.ico")
-async def favicon():
-    """返回404避免favicon请求日志"""
-    raise HTTPException(status_code=404, detail="Not found")
-
-@app.get("/.well-known/security.txt")
-async def security_txt():
-    """安全政策文件"""
-    security_content = """Contact: admin@yourdomain.com
-Policy: This is a private API service
-Preferred-Languages: en, zh
-"""
-    return PlainTextResponse(security_content, media_type="text/plain")
-
-@app.get("/health")
+@app.get("/health", tags=["系统信息"])
 async def health_check():
     try:
         result = subprocess.run(["gemini", "--help"], capture_output=True, text=True, timeout=5)
@@ -496,7 +505,8 @@ async def health_check():
     except Exception as e:
         return {"status": "unhealthy", "error": str(e)}
 
-@app.post("/token", response_model=Token)
+
+@app.post("/token", tags=["用户认证"], response_model=Token)
 async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
     user = authenticate_user(fake_users_db, form_data.username, form_data.password)
     if not user:
@@ -504,76 +514,13 @@ async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends(
     token = create_access_token(data={"sub": user.username})
     return {"access_token": token, "token_type": "bearer"}
 
-def normalize_path(path: str) -> str:
-    """标准化路径，处理相对路径和符号链接"""
-    # 移除多余的空格
-    path = path.strip()
-    
-    # 处理相对路径，默认补全为 /opt/user_data/
-    if not path.startswith('/'):
-        path = f"/opt/user_data/{path}"
-    
-    # 标准化路径，解析 . 和 .. 
-    normalized = os.path.normpath(path)
-    
-    # 解析符号链接（如果存在）
-    try:
-        if os.path.exists(normalized):
-            normalized = os.path.realpath(normalized)
-    except Exception:
-        pass  # 如果路径不存在或无法解析，继续使用标准化后的路径
-    
-    return normalized
 
-def validate_prompt_security(prompt: str) -> str:
-    """验证prompt安全性，允许访问 /opt/user_data 和 /opt/files 目录"""
-    # 查找prompt中的文件路径
-    # 匹配常见的文件路径模式
-    path_patterns = [
-        r'(?:读取|分析|查看|打开|访问|获取)\s*([/\w\.-]+(?:\.[a-zA-Z0-9]+)?)',  # 中文动词 + 路径
-        r'(?:read|analyze|view|open|access|get)\s+([/\w\.-]+(?:\.[a-zA-Z0-9]+)?)',  # 英文动词 + 路径
-        r'([/\w\.-]+\.[a-zA-Z0-9]+)',  # 带扩展名的文件路径
-        r'(/[/\w\.-]+)',  # 绝对路径
-    ]
-    
-    found_paths = []
-    for pattern in path_patterns:
-        matches = re.findall(pattern, prompt, re.IGNORECASE)
-        found_paths.extend(matches)
-    
-    # 允许的目录列表
-    allowed_directories = ['/opt/user_data/', '/opt/files/']
-    
-    # 验证每个找到的路径
-    for path in found_paths:
-        if not path or len(path.strip()) < 2:
-            continue
-            
-        normalized_path = normalize_path(path)
-        
-        # 检查路径是否在允许的目录内
-        is_allowed = any(normalized_path.startswith(allowed_dir) for allowed_dir in allowed_directories)
-        
-        if not is_allowed:
-            logger.warning(f"🚨 检测到非法路径访问尝试: {path} -> {normalized_path}")
-            raise HTTPException(
-                status_code=403, 
-                detail=f"安全限制：不允许访问路径 '{path}'。仅允许访问 /opt/user_data 和 /opt/files 目录下的文件。"
-            )
-        
-        logger.info(f"✅ 路径验证通过: {path} -> {normalized_path}")
-    
-    return prompt
-
-def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_id: Optional[str] = None, file_path: Optional[str] = None) -> tuple[str, str, int]:
-    """执行Gemini CLI命令，支持文件输入"""
+def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_id: Optional[str] = None, file_paths: Optional[List[str]] = None) -> tuple[str, str, int]:
+    """执行Gemini CLI命令，支持多个文件输入"""
     try:
         current_project = project_id or DEFAULT_PROJECT_ID
         if not current_project:
             return "", "错误：需要指定project_id", 1
-        
-        # 验证prompt安全性
-        safe_prompt = validate_prompt_security(prompt)
         
         env = dict(os.environ)
         env.update({
@@ -582,23 +529,25 @@ def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_i
             'HOME': os.path.expanduser('~'),
         })
         
-        # 构建命令 - 使用--include-directories参数让gemini可以访问文件目录和用户数据目录
-        include_dirs = ["/opt/user_data"]  # 始终包含用户数据目录
+        # 默认包含的目录
+        include_dirs = set(["/opt/user_data", "/opt/files"])
+        enhanced_prompt = prompt
         
-        if file_path:
-            # 获取文件所在目录
-            file_dir = os.path.dirname(file_path)
-            if file_dir not in include_dirs:
-                include_dirs.append(file_dir)
-            # 使用--include-directories参数让gemini可以访问文件目录和用户数据目录
-            enhanced_prompt = f"{safe_prompt} {file_path}"
-            include_dirs_str = " ".join([f'--include-directories "{d}"' for d in include_dirs])
-            shell_command = f'gemini -m "{model}" -p "{enhanced_prompt}" {include_dirs_str}'
-        else:
-            # 没有文件时，仍然包含用户数据目录
-            shell_command = f'gemini -m "{model}" -p "{safe_prompt}" --include-directories "/opt/user_data"'
+        if file_paths:
+            # 添加所有文件所在目录
+            for file_path in file_paths:
+                file_dir = os.path.dirname(file_path)
+                include_dirs.add(file_dir)
+            
+            # 添加所有文件路径到提示词
+            file_args = " ".join([f'"{fp}"' for fp in file_paths])
+            enhanced_prompt = f"{prompt} {file_args}"
         
-        logger.info(f"执行命令: {shell_command[:100]}...")
+        # 构建包含目录参数
+        include_dirs_str = " ".join([f'--include-directories "{d}"' for d in include_dirs])
+        shell_command = f'gemini -m "{model}" -p "{enhanced_prompt}" {include_dirs_str}'
+        
+        logger.info(f"执行命令: {shell_command[:200]}...")
         
         result = subprocess.run(
             shell_command, 
@@ -622,117 +571,46 @@ def execute_gemini_command(prompt: str, model: str = "gemini-2.5-pro", project_i
     except Exception as e:
         return "", str(e), 1
 
-# ----------- 支持文件上传的对话接口 -------------------
-
-@app.post("/v1/chat/completions")
-async def chat_completions(
-    messages: str = Form(..., description='[{"role":"user","content":"你好，请介绍一下自己"}]'),
-    model: str = Form("gemini-2.5-pro", description="选择gemini模型"),
-    temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
-    max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
-    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
-    file: Optional[UploadFile] = File(None, description="可选：上传20MB以内的图片或文档文件"),
-    current_user: User = Depends(get_current_active_user)
-):
-    """OpenAI兼容的聊天完成接口，支持文件上传"""
-    try:
-        # 解析消息
-        import json
-        try:
-            messages_list = json.loads(messages)
-            if not isinstance(messages_list, list):
-                raise ValueError("messages必须是数组格式")
-        except json.JSONDecodeError:
-            raise HTTPException(status_code=400, detail="messages格式错误，必须是有效的JSON数组")
-        
-        # 获取用户消息
-        user_messages = [msg for msg in messages_list if msg.get("role") == "user"]
-        if not user_messages:
-            raise HTTPException(status_code=400, detail="No user message found")
-        
-        prompt = user_messages[-1].get("content", "")
-        
-        # 处理文件 - 检查文件是否真正存在且有内容
-        temp_file_path = None
-        if file and hasattr(file, 'filename') and file.filename and file.filename.strip():
-            try:
-                file_type = validate_file(file)
-                temp_file_path = await save_temp_file(file)
-                logger.info(f"已保存临时文件: {temp_file_path}, 类型: {file_type}")
-                
-                # 为文件添加描述到prompt
-                if file_type == "image":
-                    prompt = f"请分析这张图片。用户的问题是：{prompt}" if prompt else "请描述这张图片的内容"
-                else:
-                    prompt = f"请分析这个文档。用户的问题是：{prompt}" if prompt else "请总结这个文档的内容"
-            except Exception as e:
-                logger.error(f"文件处理失败: {e}")
-                raise HTTPException(status_code=400, detail=f"文件处理失败: {str(e)}")
-        
-        try:
-            # 执行Gemini命令
-            output, error, return_code = execute_gemini_command(prompt, model, project_id, temp_file_path)
-            
-            if return_code != 0:
-                raise HTTPException(status_code=500, detail=f"Gemini CLI error: {error}")
-            
-            return {
-                "id": str(uuid.uuid4()),
-                "object": "chat.completion",
-                "created": int(datetime.datetime.now().timestamp()),
-                "model": "gemini-cli-proxy",
-                "choices": [{
-                    "index": 0,
-                    "message": {"role": "assistant", "content": output},
-                    "logprobs": None,
-                    "finish_reason": "stop"
-                }],
-                "file_processed": file.filename if file else None
-            }
-        finally:
-            # 清理临时文件
-            if temp_file_path:
-                cleanup_temp_file(temp_file_path)
-                
-    except HTTPException:
-        raise
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
-
-@app.post("/chat", response_model=SimpleChatResponse)
+# ----------- 对话接口 -------------------
+# 简单对话
+@app.post("/chat", tags=["对话"], response_model=SimpleChatResponse)
 async def simple_chat(
     message: str = Form(..., description="用户消息内容"),
     model: str = Form("gemini-2.5-pro", description="使用的AI模型"),
     project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
-    file: Optional[UploadFile] = File(None, description="可选：上传20MB以内的图片或文档文件"),
+    files: List[UploadFile] = File([], description="可选：上传多个20MB以内的图片或文档文件（可多选）"),
     current_user: User = Depends(get_current_active_user)
 ):
-    """简单的聊天接口，支持文件上传"""
-    temp_file_path = None
+    """简单的聊天接口，支持多文件上传"""
+    temp_file_paths = []
     
     try:
         # 处理文件 - 检查文件是否真正存在且有内容
-        if file and hasattr(file, 'filename') and file.filename and file.filename.strip():
-            try:
-                file_type = validate_file(file)
-                temp_file_path = await save_temp_file(file)
-                logger.info(f"已保存临时文件: {temp_file_path}, 类型: {file_type}")
-                
-                # 为文件添加描述到message
-                if file_type == "image":
-                    message = f"请分析这张图片。用户的问题是：{message}" if message else "请描述这张图片的内容"
-                else:
-                    message = f"请分析这个文档。用户的问题是：{message}" if message else "请总结这个文档的内容"
-            except Exception as e:
-                logger.error(f"文件处理失败: {e}")
-                return SimpleChatResponse(
-                    response="", 
-                    status="error", 
-                    error=f"文件处理失败: {str(e)}"
-                )
+        if files:
+            for file in files:
+                if hasattr(file, 'filename') and file.filename and file.filename.strip():
+                    try:
+                        file_type = validate_file(file)
+                        temp_file_path = await save_temp_file(file)
+                        temp_file_paths.append(temp_file_path)
+                        logger.info(f"已保存临时文件: {temp_file_path}, 类型: {file_type}")
+                    except Exception as e:
+                        logger.error(f"文件处理失败: {e}")
+                        # 清理已保存的文件
+                        for path in temp_file_paths:
+                            cleanup_temp_file(path)
+                        return SimpleChatResponse(
+                            response="", 
+                            status="error", 
+                            error=f"文件处理失败: {str(e)}"
+                        )
+        
+        # 如果有文件，添加文件描述到message
+        if temp_file_paths:
+            message = f"请分析这些文件。用户的问题是：{message}" if message else "请分析这些文件"
         
         # 执行Gemini命令
-        output, error, return_code = execute_gemini_command(message, model, project_id, temp_file_path)
+        output, error, return_code = execute_gemini_command(message, model, project_id, temp_file_paths if temp_file_paths else None)
         
         if return_code == 0:
             return SimpleChatResponse(
@@ -757,19 +635,94 @@ async def simple_chat(
         )
     finally:
         # 清理临时文件
-        if temp_file_path:
+        for temp_file_path in temp_file_paths:
             cleanup_temp_file(temp_file_path)
+
+# 兼容OpenAI对话接口
+@app.post("/v1/chat/completions", tags=["对话"])
+async def chat_completions(
+    messages: str = Form(..., description='[{"role":"user","content":"你好，请介绍一下自己"}]'),
+    model: str = Form("gemini-2.5-pro", description="选择gemini模型"),
+    temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
+    max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
+    project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
+    files: List[UploadFile] = File([], description="可选：上传20MB以内的图片或文档文件（可多选）"),
+    current_user: User = Depends(get_current_active_user)
+):
+    """OpenAI兼容的聊天完成接口，支持文件上传"""
+    try:
+        # 解析消息
+        import json
+        try:
+            messages_list = json.loads(messages)
+            if not isinstance(messages_list, list):
+                raise ValueError("messages必须是数组格式")
+        except json.JSONDecodeError:
+            raise HTTPException(status_code=400, detail="messages格式错误，必须是有效的JSON数组")
+        
+        # 获取用户消息
+        user_messages = [msg for msg in messages_list if msg.get("role") == "user"]
+        if not user_messages:
+            raise HTTPException(status_code=400, detail="No user message found")
+        
+        prompt = user_messages[-1].get("content", "")
+        
+        # 处理文件 - 检查文件是否真正存在且有内容
+        temp_file_paths = []
+        if files:
+            for file in files:
+                if hasattr(file, 'filename') and file.filename and file.filename.strip():
+                    try:
+                        file_type = validate_file(file)
+                        temp_file_path = await save_temp_file(file)
+                        logger.info(f"已保存临时文件: {temp_file_path}, 类型: {file_type}")
+                        temp_file_paths.append(temp_file_path)
+                    except Exception as e:
+                        logger.error(f"文件处理失败: {e}")
+                        # 清理已保存的文件
+                        for path in temp_file_paths:
+                            cleanup_temp_file(path)
+                        raise HTTPException(status_code=400, detail=f"文件处理失败: {str(e)}")
+        
+        try:
+            # 如果有文件，添加文件描述到prompt
+            if temp_file_paths:
+                prompt = f"请分析这些文件。用户的问题是：{prompt}" if prompt else "请分析这些文件"
+            
+            # 执行Gemini命令
+            output, error, return_code = execute_gemini_command(prompt, model, project_id, temp_file_paths if temp_file_paths else None)
+            
+            if return_code != 0:
+                raise HTTPException(status_code=500, detail=f"Gemini CLI error: {error}")
+            
+            return {
+                "id": str(uuid.uuid4()),
+                "object": "chat.completion",
+                "created": int(datetime.datetime.now().timestamp()),
+                "model": "gemini-cli-proxy",
+                "choices": [{
+                    "index": 0,
+                    "message": {"role": "assistant", "content": output},
+                    "logprobs": None,
+                    "finish_reason": "stop"
+                }],
+            "files_processed": [f.filename for f in files] if files else None
+            }
+        finally:
+            # 清理临时文件
+            for temp_file_path in temp_file_paths:
+                cleanup_temp_file(temp_file_path)
+                
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
+
+
 
 # ----------- 多轮对话会话接口 -------------------
 
-# 会话存储结构
-class SessionData:
-    def __init__(self):
-        self.messages: List[Dict[str, str]] = []
-        self.last_update: datetime.datetime = datetime.datetime.utcnow()
-        self.uploaded_files: Dict[str, str] = {}  # 原文件名 -> 实际存储路径的映射
-
-sessions: Dict[str, SessionData] = {}
+# Sessions dictionary is already defined at the top
 
 MAX_SESSION_MESSAGES = 20      # 最多20轮对话
 SESSION_TIMEOUT_SECONDS = 600  # 10分钟未更新即过期
@@ -792,7 +745,7 @@ def ensure_sessions_limit():
         logger.info(f"清理超出数量限制会话: {sid}")
         del sessions[sid]
 
-@app.post("/v1/chat/sessions/{session_id}/completions")
+@app.post("/v1/chat/sessions/{session_id}/completions", tags=["对话"])
 async def chat_session_completions(
     session_id: str = Path(..., description="会话ID，用于标识多轮对话"),
     messages: str = Form(..., description='[{"role":"user","content":"继续我们之前的对话"}]'),
@@ -800,14 +753,14 @@ async def chat_session_completions(
     temperature: float = Form(0.7, description="控制回复的随机性，0.0-1.0之间", ge=0.0, le=1.0),
     max_tokens: int = Form(1000, description="最大生成token数量", ge=1, le=8192),
     project_id: Optional[str] = Form("", description="Google Cloud项目ID，留空使用默认项目"),
-    file: Optional[UploadFile] = File(None, description="可选：上传20MB以内的图片或文档文件"),
+    files: List[UploadFile] = File([], description="可选：上传多个20MB以内的图片或文档文件（可多选）"),
     current_user: User = Depends(get_current_active_user),
 ):
-    """支持多轮会话的对话接口，支持文件上传"""
+    """支持多轮会话和多文件上传的对话接口"""
     cleanup_expired_sessions()
     ensure_sessions_limit()
     
-    temp_file_path = None
+    temp_file_paths = []
     
     try:
         # 解析消息
@@ -846,36 +799,38 @@ async def chat_session_completions(
             if user_messages:
                 current_prompt = user_messages[-1]["content"]
         
-        file_status = None
-        if file and hasattr(file, 'filename') and file.filename and file.filename.strip():
-            try:
-                file_type = validate_file(file)
-                temp_file_path, file_status = await save_session_file(file, session_id)
-                
-                status_msg = {
-                    "new": "已保存新文件",
-                    "reused": "复用现有同名文件（内容相同）"
-                }.get(file_status, "已处理文件")
-                
-                logger.info(f"{status_msg}: {temp_file_path}, 类型: {file_type}")
-                
-                # 为文件添加描述
-                if file_type == "image":
-                    current_prompt = f"请分析这张图片。用户的问题是：{current_prompt}" if current_prompt else "请描述这张图片的内容"
-                else:
-                    current_prompt = f"请分析这个文档。用户的问题是：{current_prompt}" if current_prompt else "请总结这个文档的内容"
-            except Exception as e:
-                logger.error(f"文件处理失败: {e}")
-                raise HTTPException(status_code=400, detail=f"文件处理失败: {str(e)}")
+        file_statuses = {}
+        if files:
+            for file in files:
+                if hasattr(file, 'filename') and file.filename and file.filename.strip():
+                    try:
+                        file_type = validate_file(file)
+                        temp_file_path, file_status = await save_session_file(file, session_id)
+                        temp_file_paths.append(temp_file_path)
+                        
+                        status_msg = {
+                            "new": "已保存新文件",
+                            "reused": "复用现有同名文件（内容相同）"
+                        }.get(file_status, "已处理文件")
+                        
+                        logger.info(f"{status_msg}: {temp_file_path}, 类型: {file_type}")
+                        file_statuses[file.filename] = file_status
+                    except Exception as e:
+                        logger.error(f"文件处理失败: {e}")
+                        raise HTTPException(status_code=400, detail=f"文件处理失败: {str(e)}")
+
+        # 如果有文件，更新提示词
+        if temp_file_paths:
+            current_prompt = f"请分析这些文件。用户的问题是：{current_prompt}" if current_prompt else "请分析这些文件"
 
         # 构造完整的对话上下文
         context_prompt = "\n".join([f"{msg['role']}: {msg['content']}" for msg in sessions[session_id].messages])
         
         # 如果有文件，使用当前处理后的prompt；否则使用完整上下文
-        final_prompt = current_prompt if file else context_prompt
+        final_prompt = current_prompt if temp_file_paths else context_prompt
 
         # 执行Gemini命令
-        output, error, return_code = execute_gemini_command(final_prompt, model, project_id, temp_file_path)
+        output, error, return_code = execute_gemini_command(final_prompt, model, project_id, temp_file_paths if temp_file_paths else None)
         
         if return_code != 0:
             raise HTTPException(status_code=500, detail=f"Gemini CLI error: {error}")
@@ -900,7 +855,7 @@ async def chat_session_completions(
                 "message_count": len(sessions[session_id].messages),
                 "max_messages": MAX_SESSION_MESSAGES
             },
-            "file_processed": file.filename if file else None
+            "files_processed": [f.filename for f in files] if files else None
         }
         
     except HTTPException:
@@ -909,29 +864,13 @@ async def chat_session_completions(
         raise HTTPException(status_code=500, detail=f"Internal error: {str(e)}")
     finally:
         # 清理临时文件
-        if temp_file_path:
+        for temp_file_path in temp_file_paths:
             cleanup_temp_file(temp_file_path)
 
-# ----------- 管理接口 -------------------
-
-@app.get("/admin/blocked-ips")
-async def get_blocked_ips(current_user: User = Depends(get_current_active_user)):
-    """获取被阻止的IP列表"""
-    # 简化的实现，直接返回默认值
-    # 在实际部署中，可以通过其他方式获取中间件状态
-    return {"blocked_ips": [], "total_blocked": 0, "mode": ANTI_CRAWLER_MODE}
-
-@app.post("/admin/unblock-ip/{ip}")
-async def unblock_ip(ip: str, current_user: User = Depends(get_current_active_user)):
-    """解除IP封锁"""
-    # 简化的实现，返回成功消息
-    # 在实际部署中，可以通过其他方式管理IP封锁
-    logger.info(f"✅ 管理员请求解封IP: {ip}")
-    return {"message": f"IP {ip} 解封请求已记录"}
 
 # ----------- 会话管理接口 -------------------
 
-@app.get("/v1/chat/sessions")
+@app.get("/v1/chat/sessions", tags=["会话管理"])
 async def list_sessions(current_user: User = Depends(get_current_active_user)):
     """列出所有活跃会话"""
     cleanup_expired_sessions()
@@ -951,16 +890,7 @@ async def list_sessions(current_user: User = Depends(get_current_active_user)):
         "max_sessions": MAX_ACTIVE_SESSIONS
     }
 
-@app.delete("/v1/chat/sessions/{session_id}")
-async def delete_session(session_id: str, current_user: User = Depends(get_current_active_user)):
-    """删除指定会话"""
-    if session_id not in sessions:
-        raise HTTPException(status_code=404, detail="会话不存在")
-    
-    del sessions[session_id]
-    return {"message": f"会话 {session_id} 已删除"}
-
-@app.get("/v1/chat/sessions/{session_id}")
+@app.get("/v1/chat/sessions/{session_id}", tags=["会话管理"])
 async def get_session(session_id: str, current_user: User = Depends(get_current_active_user)):
     """获取指定会话的详细信息"""
     if session_id not in sessions:
@@ -976,7 +906,7 @@ async def get_session(session_id: str, current_user: User = Depends(get_current_
         "uploaded_files": list(session_data.uploaded_files.keys())
     }
 
-@app.get("/v1/chat/sessions/{session_id}/files")
+@app.get("/v1/chat/sessions/{session_id}/files", tags=["会话管理"])
 async def list_session_files(session_id: str, current_user: User = Depends(get_current_active_user)):
     """列出会话中上传的文件"""
     if session_id not in sessions:
@@ -1007,6 +937,60 @@ async def list_session_files(session_id: str, current_user: User = Depends(get_c
         "files": file_info,
         "total_files": len(file_info)
     }
+
+@app.delete("/v1/chat/sessions/{session_id}", tags=["会话管理"])
+async def delete_session(session_id: str, current_user: User = Depends(get_current_active_user)):
+    """删除指定会话"""
+    if session_id not in sessions:
+        raise HTTPException(status_code=404, detail="会话不存在")
+    
+    del sessions[session_id]
+    return {"message": f"会话 {session_id} 已删除"}
+
+
+# ----------- 反爬虫策略 -------------------
+@app.get("/robots.txt", tags=["反爬虫策略"])
+async def robots_txt():
+    """返回robots.txt内容，明确拒绝所有爬虫"""
+    robots_content = """User-agent: *
+Disallow: /
+
+# This is a private API service
+# Automated crawling, scraping, or indexing is strictly prohibited
+# Violation may result in IP blocking
+"""
+    return PlainTextResponse(robots_content, media_type="text/plain")
+
+@app.get("/favicon.ico", tags=["反爬虫策略"])
+async def favicon():
+    """返回404避免favicon请求日志"""
+    raise HTTPException(status_code=404, detail="Not found")
+
+@app.get("/.well-known/security.txt", tags=["反爬虫策略"])
+async def security_txt():
+    """安全政策文件"""
+    security_content = """Contact: admin@yourdomain.com
+Policy: This is a private API service
+Preferred-Languages: en, zh
+"""
+    return PlainTextResponse(security_content, media_type="text/plain")
+
+
+@app.get("/admin/blocked-ips", tags=["反爬虫策略"])
+async def get_blocked_ips(current_user: User = Depends(get_current_active_user)):
+    """获取被阻止的IP列表"""
+    # 简化的实现，直接返回默认值
+    # 在实际部署中，可以通过其他方式获取中间件状态
+    return {"blocked_ips": [], "total_blocked": 0, "mode": ANTI_CRAWLER_MODE}
+
+@app.post("/admin/unblock-ip/{ip}", tags=["反爬虫策略"])
+async def unblock_ip(ip: str, current_user: User = Depends(get_current_active_user)):
+    """解除IP封锁"""
+    # 简化的实现，返回成功消息
+    # 在实际部署中，可以通过其他方式管理IP封锁
+    logger.info(f"✅ 管理员请求解封IP: {ip}")
+    return {"message": f"IP {ip} 解封请求已记录"}
+
 
 # ----------- CORS 和启动 -------------------
 
