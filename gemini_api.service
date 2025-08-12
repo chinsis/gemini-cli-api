@@ -4,9 +4,9 @@ After=network.target
 
 [Service]
 Type=simple
-WorkingDirectory=/opt/api
-ExecStart=/opt/api/venv/bin/python /opt/api/main.py
-EnvironmentFile=/opt/api/.env
+WorkingDirectory=/opt/gemini-cli-api
+ExecStart=/opt/gemini-cli-api/venv/bin/python /opt/gemini-cli-api/main.py
+EnvironmentFile=/opt/gemini-cli-api/.env
 Restart=always
 RestartSec=5
 User=root
