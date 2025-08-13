@@ -18,7 +18,7 @@ Gemini CLI API 是一个基于 FastAPI 的包装服务器，集成了 OAuth2 密
 
 1. **克隆项目代码**
    ```shell
-   git clone <你的仓库地址>
+   git clone https://github.com/chinsis/gemini-cli-api.git
    cd gemini-cli-api
    ```
 
