@@ -962,7 +962,7 @@ Disallow: /
 """
     return PlainTextResponse(robots_content, media_type="text/plain")
 
-@app.get("/favicon.ico", tags=["反爬虫策略"])
+@app.get("/favicon.ico", tags=["系统信息"])
 async def favicon():
     """返回404避免favicon请求日志"""
     raise HTTPException(status_code=404, detail="Not found")
