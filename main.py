@@ -327,7 +327,7 @@ CRAWLER_USER_AGENTS = [
 # 可疑路径模式 
 SUSPICIOUS_PATHS = [
     r"/robots\.txt", r"/sitemap\.xml", r"/\.well-known/.*", 
-    r"/wp-admin/.*", r"/admin/.*", r"/login.*",
+    r"/wp-admin/.*", r"/login.*",
     r"/\.git.*", r"/\.svn.*", r"/\.env.*", r"/config.*",
     r"/backup.*", r"/test.*", r"/debug.*", r"/api/v\d+/.*"
 ]
@@ -336,7 +336,7 @@ SUSPICIOUS_PATHS = [
 ALLOWED_PATHS = [
     r"/", r"/docs.*", r"/redoc.*", r"/openapi\.json",
     r"/health", r"/token", r"/v1/chat/.*", r"/chat",
-    r"/favicon\.ico",
+    r"/favicon\.ico",r"/admin/.*", 
 ]
 
 class AntiCrawlerMiddleware(BaseHTTPMiddleware):
