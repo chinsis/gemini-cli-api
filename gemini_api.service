@@ -7,6 +7,7 @@ Type=simple
 WorkingDirectory=/opt/gemini-cli-api
 ExecStart=/opt/gemini-cli-api/venv/bin/python /opt/gemini-cli-api/main.py
 EnvironmentFile=/opt/gemini-cli-api/.env
+EnvironmentFile="HOME=/opt/files"
 Restart=always
 RestartSec=5
 User=root
